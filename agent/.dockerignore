@@ -1,0 +1,49 @@
+# Files excluded from Docker build context to keep image small
+# (also speeds up build by avoiding unnecessary COPY)
+
+**/__pycache__/
+**/*.pyc
+**/*.pyo
+**/.pytest_cache/
+**/.coverage
+**/htmlcov/
+**/.venv/
+**/venv/
+
+# Secrets (must NEVER be in image)
+**/.env
+**/.env.local
+agent_server/.env
+
+# Runtime outputs (regenerated in container)
+agent_server/logs/
+examples/end_to_end_demo_outputs/
+
+# Build artifacts
+**/*.zip
+**/build/
+**/dist/
+
+# Version control
+.git/
+.gitignore
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Docs that don't affect runtime
+**/*.md
+!references/*.md
+!agent_server/README.md
+
+# Skill track only (agent runtime needs examples/quadruped_locomotion — keep it)
+tests/test_*.py
+tests/__init__.py
+assets/
+presentation/
+isaac-lab-rl-copilot.zip

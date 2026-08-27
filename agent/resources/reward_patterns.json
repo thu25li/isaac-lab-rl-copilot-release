@@ -1,0 +1,419 @@
+{
+  "version": "0.1.0",
+  "source": "curated from legged_gym (ETH RSL), IsaacLab (NVIDIA), IsaacGymEnvs, Walk These Ways (Margolis CoRL 2023)",
+  "note": "所有 pattern 的代码、权重、公式均直接引用自上述源码库的实际配置。权重数值不要随意修改——它们经过大量实验验证，量级搭配有内在合理性。",
+  "notation": {
+    "v_xy": "基座线速度 (机体坐标系)",
+    "omega_z": "偏航角速度",
+    "g_b": "机体坐标系下的投影重力",
+    "tau": "关节力矩",
+    "a_t": "时刻 t 的动作",
+    "q": "关节位置"
+  },
+  "patterns": [
+    {
+      "id": "linear_velocity_tracking",
+      "name": "Linear Velocity Tracking",
+      "category": "task_reward",
+      "purpose": "促使智能体匹配指令中的前进/侧向速度。四足运动最主要的任务奖励项",
+      "formula": "r = exp(-||v_xy_cmd - v_xy_base||² / σ²), σ=0.25",
+      "formula_notes": "误差在机体坐标系下计算（root_lin_vel_b）。σ→∞ 退化为线性；σ→0 退化为稀疏 0/1。σ=0.25 是 ETH RSL / IsaacLab 默认",
+      "isaac_lab_func": "mdp.track_lin_vel_xy_exp",
+      "func_params": {"std": 0.25, "command_name": "base_velocity"},
+      "weight_range": "1.0",
+      "weight_notes": "legged_gym / IsaacLab velocity_env_cfg / AnymalTerrain.yaml 均使用 1.0。是总奖励中的主导项",
+      "when_to_use": "始终作为速度跟踪运动的基础奖励项。配合 angular_velocity_tracking 及少量惩罚项使用",
+      "pitfalls": [
+        "权重过大 + only_positive_rewards=True 会导致策略走捷径（抖动保持奖励为正）",
+        "σ 过小使奖励稀疏，学习缓慢；σ 过大(>1.0)使策略懒散，无法精准跟踪",
+        "平地与崎岖地形需重新调整：崎岖地形腿可能打滑，小 σ 导致不稳定"
+      ],
+      "template": "rewards/locomotion_velocity.py.tmpl",
+      "sources": ["legged_gym/legged_robot.py::_reward_tracking_lin_vel", "isaaclab/envs/mdp/rewards.py::track_lin_vel_xy_exp", "isaacgymenvs/tasks/anymal_terrain.py"]
+    },
+    {
+      "id": "angular_velocity_tracking",
+      "name": "Angular Velocity Tracking",
+      "category": "task_reward",
+      "purpose": "奖励对指令偏航角速度的跟踪。与线速度跟踪配套，实现完整速度指令控制",
+      "formula": "r = exp(-(ω_z_cmd - ω_z_base)² / σ²), σ=0.25",
+      "formula_notes": "仅偏航分量（标量）的指数核",
+      "isaac_lab_func": "mdp.track_ang_vel_z_exp",
+      "func_params": {"std": 0.25, "command_name": "base_velocity"},
+      "weight_range": "0.5",
+      "weight_notes": "通常为线速度跟踪权重的一半（偏航指令使用频率较低）",
+      "when_to_use": "任何偏航/方向控制重要的任务（导航、避障）。heading_command=True 时隐式奖励航向跟踪",
+      "pitfalls": [
+        "权重相对于 linear_velocity_tracking 过大会导致原地旋转",
+        "heading_command 模式下，指令偏航由 PI 控制器计算；紧密跟踪可能导致振荡（heading_control_stiffness 通常设 0.5 左右）",
+        "Walk These Ways 使用单独的 σ_yaw，通常与线速度的 σ 不同"
+      ],
+      "template": "rewards/locomotion_velocity.py.tmpl",
+      "sources": ["legged_gym::_reward_tracking_ang_vel", "isaaclab/envs/mdp/rewards.py::track_ang_vel_z_exp", "Walk These Ways corl_rewards.py"]
+    },
+    {
+      "id": "flat_orientation_l2",
+      "name": "Flat Orientation Penalty",
+      "category": "stability_penalty",
+      "purpose": "惩罚机身俯仰/横滚倾斜，保持机器人直立。防止策略为追求速度而低头匍匐",
+      "formula": "r = -(g_bx² + g_by²)",
+      "formula_notes": "使用投影重力向量的 xy 分量。基座水平时 g_b≈[0,0,-1]，奖励为 0；倾斜时惩罚二次方增长",
+      "isaac_lab_func": "mdp.flat_orientation_l2",
+      "func_params": {},
+      "weight_range": "0.0 (默认关闭) 到 -10.0 (强姿态约束)",
+      "weight_notes": "legged_gym / IsaacLab 默认 0.0（依赖 lin_vel_z 和 ang_vel_xy 隐式保持直立）；Walk These Ways / Spot config 用 -1.0 到 -10.0",
+      "when_to_use": "策略有前冲或低头倾向时。平地运动边缘状态；崎岖地形或跳跃/跨步任务几乎必需",
+      "pitfalls": [
+        "权重过大(如 -10)会导致策略拒绝行走，产生冻结/站立策略。需配合足够的正速度跟踪奖励",
+        "该项是惩罚项，受 only_positive_rewards=True 截断",
+        "只惩罚姿态不惩罚角速度——需配合 ang_vel_xy_l2 实现完整稳定效果"
+      ],
+      "template": "rewards/locomotion_stability.py.tmpl",
+      "sources": ["isaaclab/envs/mdp/rewards.py::flat_orientation_l2", "legged_gym::_reward_orientation", "Spot base_orientation_penalty"]
+    },
+    {
+      "id": "joint_torques_l2",
+      "name": "Joint Torques Penalty",
+      "category": "energy_penalty",
+      "purpose": "惩罚关节力矩消耗，促进高效低能耗步态。运动控制中主要的能量惩罚项",
+      "formula": "r = -Σ τ_i²",
+      "formula_notes": "L2 平方核。IsaacLab 和 legged_gym 均使用 sum（不是 mean）",
+      "isaac_lab_func": "mdp.joint_torques_l2",
+      "func_params": {},
+      "weight_range": "-1.0e-5 (legged_gym/IsaacLab) 到 -2.0e-5 (AnymalTerrain)",
+      "weight_notes": "值极小因为 τ² 量级可达 10^4（80 N·m 平方后 6400，乘 12 关节约 10^5）。-1e-5 权重产生约 -1.0 奖励，与跟踪奖励同量级",
+      "when_to_use": "始终使用。防止策略过度发力，对 sim-to-real 至关重要（真机有热极限）。通常配合 joint_acc_l2",
+      "pitfalls": [
+        "权重过大：策略过于保守，形成软步态，无法支撑自身重量，下坠或无法行走",
+        "权重过小：步态粗暴，硬件损害大，sim-to-real 效果差",
+        "切勿在未重新调整权重的情况下将 sum 替换为 mean，否则破坏量级平衡",
+        "only_positive_rewards=True 时可能被截断失效"
+      ],
+      "template": "rewards/locomotion_energy.py.tmpl",
+      "sources": ["legged_gym::_reward_torques", "isaaclab/envs/mdp/rewards.py::joint_torques_l2", "isaacgymenvs/tasks/anymal_terrain.py"]
+    },
+    {
+      "id": "action_rate_l2",
+      "name": "Action Rate Penalty",
+      "category": "smoothness_penalty",
+      "purpose": "惩罚连续动作的剧烈变化，减少高频抖动，保护真实硬件",
+      "formula": "r = -||a_t - a_{t-1}||²",
+      "formula_notes": "连续动作差异的 L2 平方",
+      "isaac_lab_func": "mdp.action_rate_l2",
+      "func_params": {},
+      "weight_range": "-0.01",
+      "weight_notes": "legged_gym / IsaacLab / AnymalTerrain 均使用 -0.01。动作截断在 [-100, 100]，典型 Δa 约 0.1-1.0，12 关节平方和约 1，乘 -0.01 后约 -0.01。量级远小于跟踪奖励，仅作正则化",
+      "when_to_use": "始终使用。sim-to-real 必需项。Walk These Ways 提供二阶平滑度 action_smoothness_2（奖励加速度层面平滑度）",
+      "pitfalls": [
+        "权重过大：策略动作僵硬，无法对地形干扰响应",
+        "二阶平滑度对 sim-to-real 有效但调参不慎会导致学习初期过慢",
+        "该项随动作维度缩放；添加/移除关节需重新调整权重"
+      ],
+      "template": "rewards/locomotion_energy.py.tmpl",
+      "sources": ["legged_gym::_reward_action_rate", "isaaclab/envs/mdp/rewards.py::action_rate_l2", "Walk These Ways::_reward_action_smoothness_1"]
+    },
+    {
+      "id": "feet_air_time",
+      "name": "Feet Air Time Reward",
+      "category": "gait_reward",
+      "purpose": "奖励迈出好步：脚接触地面时，奖励其在空中停留时间超过阈值。隐式鼓励有节奏步态（非拖步）",
+      "formula": "r = Σ_i max(0, t_air,i - t_thresh) · 1[first_contact] · 1[||v_xy_cmd|| > 0.1]",
+      "formula_notes": "仅在接触第一步奖励空中时间超过阈值的部分。阈值通常 0.5 秒。零指令时奖励置零（防止原地踏步）",
+      "isaac_lab_func": "mdp.feet_air_time",
+      "func_params": {"threshold": 0.5, "command_name": "base_velocity", "sensor_cfg": "SceneEntityCfg('contact_forces', body_names='.*FOOT')"},
+      "weight_range": "0.125 (IsaacLab) 到 1.0 (legged_gym/AnymalTerrain)",
+      "weight_notes": "legged_gym 用 1.0（空中时间约 0.5s，乘阈值偏移后约 0-0.5）；IsaacLab 用 0.125（last_air_time 已滤波）",
+      "when_to_use": "步态成型任务。隐式产生类似 Trot 的步态。显式步态成型（Pace/Bound/Gallop）需用 Walk These Ways 或 Spot GaitReward（基于接触相位的时钟）",
+      "pitfalls": [
+        "权重过大会导致策略为延长空中时间而跳跃，引发不稳定",
+        "阈值过大可能导致奖励始终为 0",
+        "零指令时奖励置零是为防止原地踏步",
+        "Walk These Ways 提供基于时钟的步态奖励 tracking_contacts_shaped_force/vel，是更高级替代"
+      ],
+      "template": "rewards/locomotion_stability.py.tmpl",
+      "sources": ["legged_gym::_reward_feet_air_time", "isaaclab_tasks/.../velocity/mdp/rewards.py::feet_air_time", "isaacgymenvs/tasks/anymal_terrain.py"]
+    },
+    {
+      "id": "joint_pos_limits",
+      "name": "Joint Position Limits Penalty",
+      "category": "safety_penalty",
+      "purpose": "惩罚关节接近或超出物理极限，防止机械限位冲击",
+      "formula": "r = -Σ_i [max(0, q_min_soft - q_i) + max(0, q_i - q_max_soft)]",
+      "formula_notes": "使用 soft_dof_pos_limit（通常 URDF 原始限制的 90-100%）作为边界，对超出部分单侧惩罚",
+      "isaac_lab_func": "mdp.joint_pos_limits",
+      "func_params": {},
+      "weight_range": "0.0 (默认关闭) 到 -10.0",
+      "weight_notes": "legged_gym 默认 soft_dof_pos_limit=1.0（全范围），惩罚默认关闭；IsaacLab 默认 0.0，建议开启；Walk These Ways 默认开启",
+      "when_to_use": "总是推荐使用，特别是大动作幅度机器人。结合 dof_vel_limits 和 torque_limits",
+      "pitfalls": [
+        "必须确保 URDF 中的限制值正确",
+        "高刚度 PD 控制下关节可能瞬间超出软限制",
+        "受 only_positive_rewards 截断影响"
+      ],
+      "template": "rewards/locomotion_stability.py.tmpl",
+      "sources": ["legged_gym::_reward_dof_pos_limits", "isaaclab/envs/mdp/rewards.py::joint_pos_limits"]
+    },
+    {
+      "id": "is_terminated",
+      "name": "Termination Penalty",
+      "category": "safety_penalty",
+      "purpose": "惩罚导致非超时的环境终止（通常摔倒或非法接触）。防止策略采取高风险动作",
+      "formula": "r = -1[terminated] · 1[¬timeout]",
+      "formula_notes": "仅惩罚非超时终止",
+      "isaac_lab_func": "mdp.is_terminated",
+      "func_params": {},
+      "weight_range": "-1.0 到 -10.0 (默认 0.0 关闭)",
+      "weight_notes": "legged_gym / AnymalTerrain 默认关闭（依赖物理重置）。实践通常设 -1.0 到 -10.0",
+      "when_to_use": "策略倾向鲁莽动作时。结合 illegal_contact 终止条件使用。对训练稳健性至关重要",
+      "pitfalls": [
+        "不要惩罚超时，否则策略学会拖延",
+        "权重过大会导致策略过于保守，拒绝移动",
+        "legged_gym 中该项在 only_positive_rewards 截断后添加，以确保惩罚生效"
+      ],
+      "template": "rewards/locomotion_stability.py.tmpl",
+      "sources": ["isaaclab/envs/mdp/rewards.py::is_terminated", "legged_gym::_reward_termination"]
+    },
+    {
+      "id": "lin_vel_z_l2",
+      "name": "Vertical Velocity Penalty",
+      "category": "stability_penalty",
+      "purpose": "惩罚基座垂直方向线速度，防止机器人上下颠簸/跳跃。与 flat_orientation_l2 共同维持机身水平稳定",
+      "formula": "r = -v_z²",
+      "formula_notes": "基座 z 轴线速度的平方。IsaacLab / legged_gym 均使用 root_lin_vel[:, 2]",
+      "isaac_lab_func": "mdp.lin_vel_z_l2",
+      "func_params": {},
+      "weight_range": "-2.0 (legged_gym/IsaacLab 默认)",
+      "weight_notes": "v_z 典型量级 0.1-0.5 m/s，平方后约 0.01-0.25，乘 -2.0 后约 -0.02 到 -0.5。与跟踪奖励同量级，是稳定性的主导惩罚项",
+      "when_to_use": "任何需要保持机身水平稳定的运动任务（几乎所有 locomotion）。比 flat_orientation_l2 更基础——默认始终开启",
+      "pitfalls": [
+        "权重过大：策略为消除 v_z 而僵硬行走，失去弹性",
+        "与 flat_orientation_l2 功能重叠——后者惩罚姿态倾斜，前者惩罚垂直速度。通常 lin_vel_z_l2 已足够维持稳定",
+        "跳跃任务（如 Parkour）应关闭或大幅降低此项"
+      ],
+      "template": "rewards/locomotion_stability.py.tmpl",
+      "sources": ["isaaclab/envs/mdp/rewards.py::lin_vel_z_l2", "legged_gym::_reward_lin_vel_z", "isaacgymenvs/tasks/anymal_terrain.py"]
+    },
+    {
+      "id": "ang_vel_xy_l2",
+      "name": "Roll/Pitch Angular Velocity Penalty",
+      "category": "stability_penalty",
+      "purpose": "惩罚基座横滚/俯仰角速度，防止机器人翻滚或前扑。与 lin_vel_z_l2 配合实现完整姿态稳定",
+      "formula": "r = -(ω_x² + ω_y²)",
+      "formula_notes": "基座 x/y 轴角速度的平方和（不含偏航 ω_z，因为偏航由 angular_velocity_tracking 控制）",
+      "isaac_lab_func": "mdp.ang_vel_xy_l2",
+      "func_params": {},
+      "weight_range": "-0.05 (legged_gym/IsaacLab 默认)",
+      "weight_notes": "ω_xy 典型量级 0.5-2.0 rad/s，平方后约 0.25-4.0，乘 -0.05 后约 -0.01 到 -0.2。量级小于 lin_vel_z_l2，作辅助稳定项",
+      "when_to_use": "始终与 lin_vel_z_l2 一起使用。防止策略通过快速俯仰/横滚获取速度（如前扑前进）",
+      "pitfalls": [
+        "权重过大：策略拒绝转弯或上下坡，行为僵硬",
+        "不要混淆 ω_z（偏航，由 angular_velocity_tracking 控制）与 ω_xy（横滚俯仰）",
+        "Walk These Ways 将此项与 lin_vel_z_l2 合并为 base_motion 惩罚"
+      ],
+      "template": "rewards/locomotion_stability.py.tmpl",
+      "sources": ["isaaclab/envs/mdp/rewards.py::ang_vel_xy_l2", "legged_gym::_reward_ang_vel_xy", "isaacgymenvs/tasks/anymal_terrain.py"]
+    },
+    {
+      "id": "joint_acc_l2",
+      "name": "Joint Acceleration Penalty",
+      "category": "smoothness_penalty",
+      "purpose": "惩罚关节加速度，促进运动平滑性。与 action_rate_l2 互补——前者惩罚动作层，后者惩罚关节动力学层",
+      "formula": "r = -Σ q̈_i²",
+      "formula_notes": "关节加速度的 L2 平方和。IsaacLab 从 joint_acc 缓冲区读取（由物理引擎微分计算）",
+      "isaac_lab_func": "mdp.joint_acc_l2",
+      "func_params": {},
+      "weight_range": "-2.5e-7 (legged_gym/IsaacLab 默认)",
+      "weight_notes": "q̈ 量级可达 10²-10³ rad/s²，平方后 10⁴-10⁶，乘 12 关节约 10⁵-10⁷。权重 -2.5e-7 产生约 -0.025 到 -2.5 奖励。量级搭配与 joint_torques_l2 类似（都是大量级平方量）",
+      "when_to_use": "始终使用。与 action_rate_l2 配合实现双层平滑度约束。对 sim-to-real 重要——真机抖动来自高加速度",
+      "pitfalls": [
+        "权重过大：策略动作过慢，无法响应地形干扰",
+        "与 action_rate_l2 功能重叠但层次不同（动作 vs 关节动力学），不能互相替代",
+        "权重数值极小，调参时勿误用 -2.5e-5 或 -2.5e-3"
+      ],
+      "template": "rewards/locomotion_energy.py.tmpl",
+      "sources": ["isaaclab/envs/mdp/rewards.py::joint_acc_l2", "legged_gym::_reward_joint_acc", "isaacgymenvs/tasks/anymal_terrain.py"]
+    },
+    {
+      "id": "undesired_contacts",
+      "name": "Undesired Contacts Penalty",
+      "category": "safety_penalty",
+      "purpose": "惩罚非预期接触（如大腿/机身触地），保护硬件并鼓励清洁步态。与 is_terminated 互补——前者惩罚接触，后者惩罚失败终止",
+      "formula": "r = -Σ_i 1[||F_contact,i|| > threshold]",
+      "formula_notes": "对配置的接触传感器（通常 .*THIGH, .*BASE）超过阈值的接触计数。IsaacLab 用 undesired_contacts 函数，legged_gym 用 _reward_collision",
+      "isaac_lab_func": "mdp.undesired_contacts",
+      "func_params": {"sensor_cfg": "SceneEntityCfg('contact_forces', body_names='.*THIGH')", "threshold": 1.0},
+      "weight_range": "-1.0 (legged_gym/IsaacLab 默认)",
+      "weight_notes": "每次非预期接触产生约 -1.0 奖励。量级与跟踪奖励相当，确保策略主动避免",
+      "when_to_use": "始终使用。尤其对 sim-to-real 关键——真机碰撞导致硬件损伤",
+      "pitfalls": [
+        "body_names 配置错误会漏检——必须覆盖所有非足端接触部位（THIGH, CALF, BASE, 等）",
+        "threshold 需根据机器人质量调整（1.0 N 适用于小型机器人，大型机器人需 5-10 N）",
+        "与终止条件（illegal_contact termination）配合使用：惩罚 + 终止双重保护"
+      ],
+      "template": "rewards/locomotion_stability.py.tmpl",
+      "sources": ["isaaclab/envs/mdp/rewards.py::undesired_contacts", "legged_gym::_reward_collision", "isaacgymenvs/tasks/anymal_terrain.py"]
+    },
+    {
+      "id": "feet_slide",
+      "name": "Feet Slide Penalty",
+      "category": "smoothness_penalty",
+      "purpose": "惩罚足端接触时的水平滑移速度。sim-to-real 关键项——真机滑动会磨损足底且引发打滑跌倒",
+      "formula": "r = -Σ_feet (||v_xy_foot|| × 1[contact == 1])",
+      "formula_notes": "仅对处于接触状态的足端累加水平速度范数。需要 contact_forces 传感器数据",
+      "isaac_lab_func": "mdp.feet_slide",
+      "func_params": {"sensor_cfg": "SceneEntityCfg('contact_forces', body_names='.*FOOT')", "asset_cfg": "SceneEntityCfg('robot')"},
+      "weight_range": "-0.5 to -2.0",
+      "weight_notes": "legged_gym velocity_env_cfg 用 -1.0；Walk These Ways 用 -0.5 配合较高 feet_air_time 权重",
+      "when_to_use": "任何足式运动任务，尤其 sim-to-real 部署前。与 feet_air_time 互补——后者奖励站立时间，前者惩罚滑移",
+      "pitfalls": [
+        "body_names 必须精确匹配足端链接名（.*FOOT 或 .*FOOT.*)，配置错误会漏检",
+        "无 contact_forces 传感器时函数报 KeyError——必须在 scene 中配置 ContactSensor",
+        "与 feet_air_time 互为反激励：高 air_time 鼓励早落地，可能导致 slide 增加；需联合调权重"
+      ],
+      "template": "rewards/locomotion_stability.py.tmpl",
+      "sources": ["legged_gym/legged_robot.py::_reward_feet_slide", "isaaclab/envs/mdp/rewards.py::feet_slide"]
+    },
+    {
+      "id": "base_height",
+      "name": "Base Height Maintenance",
+      "category": "stability_penalty",
+      "purpose": "维持机身目标高度。防止策略为追求稳定而蹲姿行走（reward hacking 的典型表现）",
+      "formula": "r = -(z_base - z_target)²",
+      "formula_notes": "L2 形式惩罚偏离目标高度。Walk These Ways 用 (z_target - z_current)² 与 body posture 联合",
+      "isaac_lab_func": "mdp.base_height_l2",
+      "func_params": {"target_height": "robot_dependent, e.g. 0.5 for A1, 0.8 for ANYmal", "asset_cfg": "SceneEntityCfg('robot')"},
+      "weight_range": "-0.5 to -2.0 (A1/ANYmal 实测)",
+      "weight_notes": "legged_gym flat 配置用 -1.0；rough terrain 通常降低到 -0.5 因需要主动降低重心应对地形",
+      "when_to_use": "任何需要稳定姿态的任务。尤其当奖励项中没显式 nominal pose 约束时",
+      "pitfalls": [
+        "target_height 需根据机器人 URDF 标称站立高度设置——错误值会导致策略强行蹲下或踮脚",
+        "权重过大会压抑速度跟踪——策略会站着不动以避免高度变化",
+        "崎岖地形应降低权重或禁用——机身高度本就需要随地形调整"
+      ],
+      "template": "rewards/locomotion_stability.py.tmpl",
+      "sources": ["isaaclab/envs/mdp/rewards.py::base_height_l2", "Walk-These-Ways/wtw/rewards.py::compute_height_control"]
+    },
+    {
+      "id": "joint_pos_default",
+      "name": "Joint Position Similar to Default",
+      "category": "smoothness_penalty",
+      "purpose": "惩罚关节偏离默认（nominal）位姿。鼓励回到站立姿态，是 action_rate_jittering failure mode 的 reward 端对策",
+      "formula": "r = -Σ_i (q_i - q_default_i)²",
+      "formula_notes": "对所有关节（hip/knee 等）累加偏离默认位置的平方。q_default 在 URDF/JointCfg 中定义",
+      "isaac_lab_func": "mdp.joint_deviation_l1",
+      "func_params": {"asset_cfg": "SceneEntityCfg('robot', joint_names='.*')"},
+      "weight_range": "-0.01 to -0.05",
+      "weight_notes": "legged_gym flat 用 -0.05；rough terrain 常降到 -0.02 因地形需要更大关节偏离",
+      "when_to_use": "任何希望策略保持 nominal pose 的任务。与 action_rate 配合实现平滑运动",
+      "pitfalls": [
+        "权重过大→策略僵化，无法适应地形或加速",
+        "q_default 配置错误（如 hip 默认值反号）→ 策略学到怪异姿态",
+        "与 stand_still 互补——前者持续约束，后者仅在零指令时启用"
+      ],
+      "template": "rewards/locomotion_stability.py.tmpl",
+      "sources": ["legged_gym/legged_robot.py::_reward_similar_to_default", "isaaclab/envs/mdp/rewards.py::joint_deviation_l1"]
+    },
+    {
+      "id": "feet_contact_force",
+      "name": "Feet Contact Force Penalty",
+      "category": "safety_penalty",
+      "purpose": "惩罚足端接触力峰值（硬着陆）。降低硬件冲击，与 feet_slide 互补——前者管滑动，后者管冲击",
+      "formula": "r = -Σ_feet max(0, ||F_contact|| - threshold)",
+      "formula_notes": "对超过阈值的接触力进行 hinge 惩罚。IsaacLab 提供方均根/最大值两种变体",
+      "isaac_lab_func": "mdp.contact_forces_l2",
+      "func_params": {"sensor_cfg": "SceneEntityCfg('contact_forces', body_names='.*FOOT')"},
+      "weight_range": "-1e-3 to -1e-2",
+      "weight_notes": "contact force 量级在百牛级，weight 必须很小。Walk These Ways 用 -1e-3 配合 max-force 变体",
+      "when_to_use": "硬质地面训练、跳跃任务、sim-to-real 前的精细化。柔软地面（草地）可省略",
+      "pitfalls": [
+        "threshold 缺失会导致所有接触都被惩罚——策略学会原地踏步以避免接触",
+        "weight 量级匹配很关键——若同时使用 joint_torques_l2 (-1e-5) 需保证两者均衡",
+        "需区分峰值力 vs RMS 力——前者对单次冲击敏感，后者对持续接触敏感"
+      ],
+      "template": "rewards/locomotion_stability.py.tmpl",
+      "sources": ["isaaclab/envs/mdp/rewards.py::contact_forces_l2", "Walk-These-Ways/wtw/rewards.py::compute_contact_force_pen"]
+    },
+    {
+      "id": "stand_still",
+      "name": "Stand Still Posture",
+      "category": "task_reward",
+      "purpose": "零指令（‖v_cmd‖<0.1）时惩罚关节偏离默认位姿。强制静止姿态自然，sim-to-real 演示必备",
+      "formula": "r = 1[‖v_xy_cmd‖<0.1] × exp(-Σ_i (q_i - q_default_i)² / σ²)",
+      "formula_notes": "门控函数——仅零指令时启用。指数核保证奖励平滑（与 linear_velocity_tracking 形式一致）",
+      "isaac_lab_func": "(custom, based on joint_pos_default + command gate)",
+      "func_params": {"command_threshold": 0.1, "std": 0.25, "command_name": "base_velocity"},
+      "weight_range": "0.5 to 1.0",
+      "weight_notes": "legged_gym flat 用 0.5；rough terrain 通常禁用因很少有零指令时刻",
+      "when_to_use": "需要稳定 idle 姿态、sim-to-real 演示、或人机协作任务（机器人需能停下等待）",
+      "pitfalls": [
+        "command_threshold 过高导致正常低速行走被错误奖励——通常 0.1 m/s 是合理门",
+        "默认姿态必须真实可稳定站立——URDF 默认值未必是稳定平衡点",
+        "与 joint_pos_default 冗余——后者全程约束，前者仅在静止时强化，需调权重避免重复惩罚"
+      ],
+      "template": "rewards/locomotion_stability.py.tmpl",
+      "sources": ["legged_gym/legged_robot.py::_reward_stand_still", "Walk-These-Ways/wtw/rewards.py::compute_stand_still_pen"]
+    },
+    {
+      "id": "object_distance",
+      "name": "Object Distance to Goal (Manipulation)",
+      "category": "task_reward",
+      "purpose": "manipulation 任务核心：缩小物体到目标位置的距离。机械臂抓取/放置/堆叠任务的基础奖励",
+      "formula": "r = -‖p_object - p_target‖ 或 r = exp(-‖p_object - p_target‖² / σ²)",
+      "formula_notes": "L2 距离（线性核）或指数核（平滑）。IsaacLab Franka lift/cube/stack 任务用指数核",
+      "isaac_lab_func": "mdp.object_distance",
+      "func_params": {"object_cfg": "SceneEntityCfg('object')", "target_cfg": "SceneEntityCfg('target')"},
+      "weight_range": "1.0 to 5.0",
+      "weight_notes": "Franka lift 用 1.0；reach + grasp 组合任务中 distance 通常 2.0-5.0 作为主导",
+      "when_to_use": "任何需要物体精确到达目标位置的 manipulation 任务（reach, lift, place, stack）",
+      "pitfalls": [
+        "L2 形式可能导致 sparse reward 问题（远距离时梯度小）——改用指数核或加 progress reward",
+        "物体在 gripper 中滑动会导致距离突变——需配合 grasp success bonus",
+        "与 end_effector_position_error 冗余——前者是物体，后者是 gripper，需根据任务阶段选择"
+      ],
+      "template": "rewards/manipulation_reach.py.tmpl",
+      "sources": ["isaaclab_tasks/manager_based/manipulation/reach/mdp/rewards.py::object_distance", "IsaacGymEnvs/FrankaLift.py"]
+    },
+    {
+      "id": "end_effector_position_error",
+      "name": "End-Effector Position Error (Manipulation)",
+      "category": "task_reward",
+      "purpose": "缩小机械臂末端（gripper）到目标位置的距离。reach 任务的核心奖励，是 object_distance 的简化版",
+      "formula": "r = -‖p_ee - p_target‖²",
+      "formula_notes": "L2 平方距离。IsaacLab Franka reach 用此形式，配合 scene's target frame",
+      "isaac_lab_func": "(custom, often implemented via mdp.body_l2_distance or relative_position)",
+      "func_params": {"ee_cfg": "SceneEntityCfg('robot', body_names='panda_hand')", "target_cfg": "SceneEntityCfg('target')"},
+      "weight_range": "1.0 to 10.0",
+      "weight_notes": "Franka reach 用 1.0；带 obstacle avoidance 时提高到 5.0 因需更精确到达",
+      "when_to_use": "纯 reach 任务（无抓取），或作为 grasp 任务的第一阶段（reach → grasp）",
+      "pitfalls": [
+        "坐标系混淆——target 在 world frame 还是 robot base frame 必须明确",
+        "末端链接名错误（panda_hand vs panda_left_finger）→ 距离算错",
+        "与 object_distance 冗余——若任务目标是物体到达而非 gripper 到达，应优先 object_distance"
+      ],
+      "template": "rewards/manipulation_reach.py.tmpl",
+      "sources": ["isaaclab_tasks/manager_based/manipulation/reach/mdp/rewards.py", "IsaacGymEnvs/FrankaReach.py"]
+    }
+  ],
+  "composition_heuristics": {
+    "description": "组合多个 pattern 成完整 RewardsCfg 的启发式规则",
+    "rules": [
+      "main task reward (velocity tracking): weight 1.0-2.0, 主导项",
+      "auxiliary task reward (angular tracking): weight 0.5-1.0, 约为主项一半",
+      "stability penalties (orientation, ang_vel): weight -0.05 到 -2.0",
+      "energy penalties (torques): weight -1e-5 到 -1e-4 (量级小因 torque 量大)",
+      "smoothness penalties (action_rate, joint_acc): weight -0.01 到 -1e-3",
+      "safety penalties (joint_pos_limits, is_terminated): weight -1.0 到 -10.0 (按需开启)",
+      "gait rewards (feet_air_time): weight 0.125-1.0 (取决于实现滤波)",
+      "disabled optional terms: weight=0.0 (保留在 config 中便于实验)",
+      "per-step total reward 量级目标: [-1, 1] 区间（Andy Jones 经验）"
+    ]
+  },
+  "common_imports": [
+    "from isaaclab.managers import RewardTermCfg as RewTerm, SceneEntityCfg",
+    "from isaaclab.utils import configclass",
+    "import isaaclab.envs.mdp as mdp",
+    "import isaaclab_tasks.manager_based.locomotion.velocity.mdp as mdp_loc",
+    "import math",
+    "import torch"
+  ]
+}

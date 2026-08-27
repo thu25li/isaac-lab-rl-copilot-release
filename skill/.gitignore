@@ -1,0 +1,45 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Virtual envs
+.venv/
+venv/
+env/
+*.conda/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Secrets / local config
+.env
+.env.local
+*.local
+
+# Build / package artifacts
+*.zip
+build/
+dist/
+
+# Skill runtime outputs (regenerable, not committed)
+examples/end_to_end_demo_outputs/
+# NOTE: tests/test_data/synthetic_*/ MUST be committed — they're acceptance test 4 fixtures.
+
+# Agent track — lives in its own repo (isaac-lab-rl-copilot-agent),
+# excluded here so the skill repo stays skill-track only.
+agent_server/
+deploy/
+

@@ -1,0 +1,463 @@
+{
+  "version": "0.1.0",
+  "source": "curated from OpenAI Spinning Up, Stable-Baselines3, Andy Jones RL debugging, legged_gym, IsaacGymEnvs, PPO/SAC papers",
+  "note": "数值阈值分两类：标注 [文献] 的有明确出处；标注 [经验] 的来自社区默认 config 或 blog 经验。诊断引擎应优先使用相对变化（如 KL 单步增量超过训练均值 5-10 倍）作为触发条件，绝对阈值仅作辅助。",
+  "failure_modes": [
+    {
+      "id": "reward_hacking",
+      "name": "Reward Hacking",
+      "category": "reward_design",
+      "summary": "reward 上升但行为不符合任务意图，agent 找到了 reward 的漏洞而非完成任务",
+      "symptoms": [
+        {"metric": "total_reward", "pattern": "increasing", "note": "接近或超过设计预期上限"},
+        {"metric": "episode_length", "pattern": "abnormal", "note": "极短或极长"},
+        {"metric": "task_metric", "pattern": "not_increasing_or_decreasing", "note": "目标指标不升甚至下降"},
+        {"metric": "reward_term_contribution", "pattern": "dominant", "threshold": 0.8, "note": "某 term 占比 >80% [经验]"}
+      ],
+      "root_causes": [
+        "某 reward term 设计可被作弊满足（如用 base_height 而机器人躺地抬高底盘）",
+        "Penalty 量级远小于 reward（小 2-3 个数量级即可能）[经验]",
+        "Sparse 主目标 + dense shaping，agent 只优化 shaping"
+      ],
+      "fixes": [
+        {"action": "打印 per-term contribution，下调异常主导 term 权重 1-2 个数量级", "priority": 1},
+        {"action": "用物理约束替代可作弊 term（如接触力 + 质心在支撑多边形内）", "priority": 2},
+        {"action": "对 shaping reward 加 curriculum 衰减", "priority": 3},
+        {"action": "加入行为约束 reward（向量化成功条件）", "priority": 4}
+      ],
+      "verification": "Per-term contribution 趋于均衡（无单 term >50%）；目标 task metric 与 total reward 同向上升；episode_length 回到合理区间",
+      "sources": ["SB3 rl_tips", "OpenAI Faulty Reward Functions", "legged_gym reward config"]
+    },
+    {
+      "id": "policy_collapse",
+      "name": "Policy Collapse",
+      "category": "training_instability",
+      "summary": "policy 在某次 iteration 后突然退化，reward 大幅下降不恢复",
+      "symptoms": [
+        {"metric": "mean_episode_reward", "pattern": "sudden_drop", "threshold": 0.5, "note": "下降 >50% 不恢复 [经验]"},
+        {"metric": "kl_divergence", "pattern": "spike", "threshold": 0.05, "note": "单步 KL >0.05-0.1 [经验]，远超 target_kl=0.01 [文献]"},
+        {"metric": "surrogate_ratio", "pattern": "out_of_range", "note": "偏离 [0.8, 1.2] 持续多步"},
+        {"metric": "entropy", "pattern": "spike_or_collapse", "note": "飙升（近均匀）或骤降（塌缩到单 action）"}
+      ],
+      "root_causes": [
+        "学习率过高 / 单次 update step 过大；缺少 KL early stop",
+        "num_epochs 过大导致同一 batch 过拟合（>10 易触发）[经验]",
+        "Reward 突变（归一化器突变、curriculum 阶跃）导致 advantage 爆炸",
+        "clip_range 过大或缺失"
+      ],
+      "fixes": [
+        {"action": "启用 target_kl early stop（默认 0.01）[文献]", "priority": 1},
+        {"action": "降低 lr：1e-4~3e-4 → 5e-5~1e-4 [经验]", "priority": 2},
+        {"action": "降低 num_epochs（4-10，常用 4）[文献]", "priority": 3},
+        {"action": "启用 advantage normalization（per-batch 标准化）", "priority": 4},
+        {"action": "检查 reward 归一化器是否突变；用 RunningMeanStd 平滑", "priority": 5}
+      ],
+      "verification": "KL 单步增量维持在 target_kl 附近；reward 下降后能恢复；ratio 集中在 [0.8, 1.2]",
+      "sources": ["PPO 原论文 Schulman 2017", "Spinning Up PPO (target_kl=0.01)", "ICLR 37 Implementation Details of PPO"]
+    },
+    {
+      "id": "gradient_explosion",
+      "name": "Gradient Explosion",
+      "category": "training_instability",
+      "summary": "梯度范数飙升，loss 变 NaN/Inf，训练卡死",
+      "symptoms": [
+        {"metric": "grad_norm", "pattern": "spike", "threshold": 100, "note": ">1e2 [经验]，正常 PPO 在 0.1-10 量级"},
+        {"metric": "value_loss", "pattern": "explosion", "threshold": 100, "note": ">1e2 或 NaN/Inf"},
+        {"metric": "loss", "pattern": "nan_or_inf", "note": "训练卡死"}
+      ],
+      "root_causes": [
+        "Reward 量级未归一化（单步 reward 达 1e3+）",
+        "未启用 grad clip 或 grad clip 阈值过大",
+        "Value bootstrap target 异常（gamma 接近 1 + 长 episode + 大 reward）",
+        "观测含异常值（未 clip 的关节角度/速度）"
+      ],
+      "fixes": [
+        {"action": "启用 grad clip：max_grad_norm=1.0 [文献，SB3/legged_gym/IsaacGymEnvs 默认]", "priority": 1},
+        {"action": "归一化 reward（RunningMeanStd / VecNormalize）", "priority": 2},
+        {"action": "Clip 观测到 [-10, 10]", "priority": 3},
+        {"action": "检查 gamma（0.99 默认；长 horizon 用 0.99，短用 0.9-0.95）", "priority": 4},
+        {"action": "降低 value_loss_coef（经验 0.5-4.0，默认 0.5/1.0）", "priority": 5}
+      ],
+      "verification": "grad_norm 稳定 <10；value loss 单调下降或平稳；无 NaN/Inf",
+      "sources": ["SB3 checking_nan", "legged_gym 默认配置 (grad_clip 1.0)", "Andy Jones (reward scale)"]
+    },
+    {
+      "id": "gradient_vanishing",
+      "name": "Gradient Vanishing",
+      "category": "training_instability",
+      "summary": "梯度持续极小，policy 不更新，训练停滞",
+      "symptoms": [
+        {"metric": "grad_norm", "pattern": "vanishing", "threshold": 1e-4, "note": "<1e-4 持续 [经验]"},
+        {"metric": "policy_loss", "pattern": "constant", "note": "接近常数不下降"},
+        {"metric": "value_loss", "pattern": "constant", "note": "接近常数不下降"},
+        {"metric": "entropy", "pattern": "constant", "note": "不变（policy 几乎不更新）"}
+      ],
+      "root_causes": [
+        "网络过深 + 无归一化层 + tanh/sigmoid 激活导致梯度消失",
+        "Learning rate 过低（<1e-6）",
+        "Advantage 持续接近 0（reward 完全平坦或归一化过度）",
+        "观测未归一化导致输入量级过大，激活进入饱和区"
+      ],
+      "fixes": [
+        {"action": "归一化观测（VecNormalize / RunningMeanStd）[文献]", "priority": 1},
+        {"action": "用 ReLU/GELU 替代 sigmoid；加 LayerNorm", "priority": 2},
+        {"action": "提高 lr 到 1e-4~3e-4 [经验]", "priority": 3},
+        {"action": "检查 advantage 是否全 0；增加探索（提高 entropy coef 或加 action noise）", "priority": 4}
+      ],
+      "verification": "grad_norm 回到 0.1-10 量级；entropy 出现变化；reward 开始上升",
+      "sources": ["SB3 rl_tips (必须归一化输入)", "Spinning Up (归一化是关键)"]
+    },
+    {
+      "id": "entropy_collapse",
+      "name": "Entropy Collapse",
+      "category": "exploration_failure",
+      "summary": "policy 过早确定性化，探索停滞",
+      "symptoms": [
+        {"metric": "entropy", "pattern": "collapse", "threshold": 0.1, "note": "前 100-500 iter 降到 <0.1 且持续下降 [经验]"},
+        {"metric": "entropy_bonus", "pattern": "low_contribution", "threshold": 0.01, "note": "占总 loss 比例 <1% [经验]"},
+        {"metric": "action_std", "pattern": "monotonic_decrease", "threshold": 1e-3, "note": "连续动作 std 单调下降到 <1e-3 [经验]"},
+        {"metric": "reward", "pattern": "plateau", "note": "探索停滞，reward 平台"}
+      ],
+      "root_causes": [
+        "entropy_coef 过低（<1e-3 易触发）[经验]；PPO 默认常 0.0-0.01",
+        "学习率过高，policy 快速塌缩到确定性",
+        "缺少探索噪声或 curriculum 阶跃过早",
+        "SAC 中 alpha 自动调到 0"
+      ],
+      "fixes": [
+        {"action": "提高 entropy_coef：0.01 → 0.05（范围 0.01-0.1）[经验]", "priority": 1},
+        {"action": "对 entropy coef 做 schedule（早期高，后期衰减）", "priority": 2},
+        {"action": "降低 lr 或减少 num_epochs", "priority": 3},
+        {"action": "SAC：检查 target_entropy（常用 -|action_dim|），clamp alpha 到 [1e-4, 1]", "priority": 4},
+        {"action": "给 action std 设下限（如 min_std=0.1）", "priority": 5}
+      ],
+      "verification": "Entropy 训练前期维持 >0.5-1.0，后期缓慢下降；多 seed 表现分化；reward 持续上升",
+      "sources": ["PPO 原论文 (entropy bonus)", "SB3 PPO 默认 ent_coef=0.0", "SAC 原论文 (target entropy=-dim(A))"]
+    },
+    {
+      "id": "value_function_divergence",
+      "name": "Value Function Divergence",
+      "category": "critic_failure",
+      "summary": "critic 不收敛，value 估计震荡或发散",
+      "symptoms": [
+        {"metric": "value_loss", "pattern": "non_converging", "note": "震荡或持续上升"},
+        {"metric": "explained_variance", "pattern": "low", "threshold": 0.0, "note": "<0 或接近 0（正常应 >0.5 趋近 1）"},
+        {"metric": "value_estimate", "pattern": "divergence", "note": "与实际 return 偏差 >1 个数量级"}
+      ],
+      "root_causes": [
+        "Reward 量级过大 / 未归一化 → return 量级过大 → value target 难学",
+        "value_loss_coef 过低（<0.1）使 critic 学不动",
+        "gamma 过大（长 horizon + 稀疏 reward）",
+        "Critic 网络过小或共享 trunk 导致 policy/value 干扰",
+        "Bootstrap 链条断裂（termination 处理错误，timeout 当 done 截断）"
+      ],
+      "fixes": [
+        {"action": "归一化 reward / return（RunningMeanStd）", "priority": 1},
+        {"action": "提高 value_loss_coef：0.5 → 1.0-2.0 [经验；IsaacGymEnvs 常用 2.0-4.0]", "priority": 2},
+        {"action": "修正 termination：timeout 应 truncated=True，不传 done [文献]", "priority": 3},
+        {"action": "分离 critic 网络（不共享 trunk）或加 LayerNorm", "priority": 4},
+        {"action": "降低 gamma 或用 GAE λ 调整（λ 0.9-0.95 [经验]）", "priority": 5}
+      ],
+      "verification": "Value loss 单调下降；explained_variance >0.8；value 估计与 return 量级一致",
+      "sources": ["SB3 rl_tips (timeout 处理)", "ICLR PPO blog (GAE, value clip)", "legged_gym (value_loss_coef 2.0)"]
+    },
+    {
+      "id": "local_optimum",
+      "name": "Local Optimum",
+      "category": "exploration_failure",
+      "summary": "reward 早期上升后长期平台，policy 卡在次优解",
+      "symptoms": [
+        {"metric": "reward", "pattern": "plateau", "threshold": 1000, "note": "早期上升后 >1000 iter 无显著变化 [经验]"},
+        {"metric": "entropy", "pattern": "medium_stable", "note": "稳定在中等水平，不塌缩也不下降"},
+        {"metric": "task_metric", "pattern": "below_benchmark", "note": "远低于文献报告值"},
+        {"metric": "seed_variance", "pattern": "multi_modal", "note": "不同 seed 卡在不同平台值（存在多峰）"}
+      ],
+      "root_causes": [
+        "Reward shaping 把 agent 引向次优 basin（如为 base_height 而蹲姿行走）",
+        "探索不足（entropy coef 低、curriculum 过早硬化）",
+        "学习率过低无法跳出",
+        "Observation 缺关键状态（部分可观测）"
+      ],
+      "fixes": [
+        {"action": "增加探索：entropy coef 提高、加 action noise、降低 curriculum 难度", "priority": 1},
+        {"action": "重新设计 reward：移除可能误导的 shaping term；用 sparse + curriculum 替代 dense shaping", "priority": 2},
+        {"action": "学习率 schedule：周期性提高或重启（cycling）", "priority": 3},
+        {"action": "增加 observation：加入历史帧、velocity、contact 状态", "priority": 4},
+        {"action": "多 seed + 选优 + 用最佳 seed 继续 fine-tune", "priority": 5}
+      ],
+      "verification": "Reward 平台被打破，出现新上升段；目标 task metric 改善；不同 seed 趋同到更高值",
+      "sources": ["SB3 rl_tips (local minima)", "Spinning Up", "legged_gym discussions (蹲姿行走)"]
+    },
+    {
+      "id": "reward_signal_too_sparse",
+      "name": "Reward Signal Too Sparse",
+      "category": "reward_design",
+      "summary": "reward 长期为 0，无学习信号",
+      "symptoms": [
+        {"metric": "reward", "pattern": "zero", "threshold": 1000, "note": "前 1000+ iter 全为 0 [经验]"},
+        {"metric": "value_loss", "pattern": "near_zero", "note": "target 都是 0"},
+        {"metric": "entropy", "pattern": "constant", "note": "policy 没方向"},
+        {"metric": "episode_length", "pattern": "constant", "note": "agent 未触发任何 reward 条件"}
+      ],
+      "root_causes": [
+        "仅稀疏成功 reward（如只给到达终点 +1），无 shaping",
+        "任务初始难度过高（agent 永远达不到 success 条件）",
+        "无 curriculum / random init 使起点不可达",
+        "Domain randomization 过强导致初始 success 概率为 0"
+      ],
+      "fixes": [
+        {"action": "加 dense shaping reward（potential-based，Ng 1999，保证不改变最优策略）[文献]", "priority": 1},
+        {"action": "Curriculum：从简单初始状态开始，逐步增加难度", "priority": 2},
+        {"action": "HER（Hindsight Experience Replay）用于 goal-conditioned 任务 [SB3 推荐]", "priority": 3},
+        {"action": "降低 domain randomization 强度；先固定环境训出 baseline", "priority": 4},
+        {"action": "增加 episode 内 progress reward（如距离目标的负 L2）", "priority": 5}
+      ],
+      "verification": "出现非零 reward；value loss 开始下降；reward 曲线开始上升",
+      "sources": ["SB3 rl_tips (sparse reward → HER 或 ARS)", "Ng 1999 potential-based shaping", "legged_gym curriculum"]
+    },
+    {
+      "id": "observation_normalization_issues",
+      "name": "Observation Normalization Issues",
+      "category": "data_pipeline",
+      "summary": "观测未归一化导致训练不收敛或收敛极慢",
+      "symptoms": [
+        {"metric": "training", "pattern": "non_converging_or_slow", "note": "完全不收敛或收敛极慢"},
+        {"metric": "obs_dimensions", "pattern": "scale_mismatch", "note": "各维度量级差异大（如关节角 ±3、IMU ±10、pixel 0-255）"},
+        {"metric": "grad_norm", "pattern": "normal", "note": "grad 正常但 loss 不降"}
+      ],
+      "root_causes": [
+        "未使用 VecNormalize / RunningMeanStd",
+        "归一化器统计未更新或更新过慢（clip 过紧）",
+        "观测含异常 outlier 污染统计",
+        "不同 env 实例观测尺度不一致（domain randomization 物理量）"
+      ],
+      "fixes": [
+        {"action": "启用 VecNormalize（obs + reward）[文献，SB3 强烈推荐]", "priority": 1},
+        {"action": "Clip observation 到 [-10, 10]", "priority": 2},
+        {"action": "对物理量做显式归一化（除以最大量级）", "priority": 3},
+        {"action": "归一化器初始化时用 random policy 跑 N 步 warmup", "priority": 4},
+        {"action": "检查归一化器 save/load（部署时需同步统计）", "priority": 5}
+      ],
+      "verification": "观测各维度均值 ~0、std ~1；loss 开始下降；reward 上升",
+      "sources": ["SB3 rl_tips (always normalize the input)", "legged_gym (obs norm 默认启用)"]
+    },
+    {
+      "id": "action_rate_jittering",
+      "name": "Action Rate Jittering",
+      "category": "behavior_quality",
+      "summary": "训练 reward 正常但动作高频抖动，真机不可部署",
+      "symptoms": [
+        {"metric": "reward", "pattern": "normal", "note": "训练 reward 正常"},
+        {"metric": "action_rate_penalty", "pattern": "large_negative", "note": "持续大负值"},
+        {"metric": "action_delta_ratio", "pattern": "high", "threshold": 1.0, "note": "|Δa|/|a| >1 [经验]"},
+        {"metric": "visualization", "pattern": "jittering", "note": "机器人物理动作高频抖动"}
+      ],
+      "root_causes": [
+        "action_rate penalty 权重过小（<-1e-3 量级才有效 [经验]，legged_gym 默认 -0.01）",
+        "Policy 输出 action std 过小（确定性高但跳变）",
+        "控制频率过低（dt 大导致 action 阶跃）",
+        "低通滤波缺失"
+      ],
+      "fixes": [
+        {"action": "提高 action_rate penalty 权重：-0.01 → -0.05~-0.1 [legged_gym 量级参考]", "priority": 1},
+        {"action": "加 action 平滑（low-pass filter 或 EMA）", "priority": 2},
+        {"action": "降低 policy 学习率或加 L2 正则", "priority": 3},
+        {"action": "提高控制频率（缩短 sim dt）", "priority": 4},
+        {"action": "加入 similar_to_default penalty 鼓励接近默认关节位姿", "priority": 5}
+      ],
+      "verification": "|Δa| 量级下降；action_rate penalty 占比 <10% 总 reward；可视化动作平滑",
+      "sources": ["legged_gym 默认 reward scales (action_rate=-0.01)", "ANYmal reward engineering"]
+    },
+    {
+      "id": "catastrophic_forgetting",
+      "name": "Catastrophic Forgetting",
+      "category": "multi_task",
+      "summary": "学新任务忘旧任务，curriculum 阶跃后旧难度退化",
+      "symptoms": [
+        {"metric": "task_a_performance", "pattern": "drop", "threshold": 0.5, "note": "切到任务 B 后 A 性能下降 >50% [经验]"},
+        {"metric": "curriculum_old_level", "pattern": "degrade", "note": "curriculum 阶跃后旧难度表现退化"},
+        {"metric": "multi_task_reward", "pattern": "oscillation", "note": "多任务训练中某任务 reward 周期性震荡"}
+      ],
+      "root_causes": [
+        "On-policy（PPO）无 replay，新数据完全覆盖旧策略",
+        "共享网络无任务标识，B 的梯度覆盖 A 的解",
+        "Replay buffer 比例失衡",
+        "学习率过高"
+      ],
+      "fixes": [
+        {"action": "用 replay buffer（off-policy：SAC/TD3）+ 混合采样", "priority": 1},
+        {"action": "加任务条件（one-hot / embedding）输入网络", "priority": 2},
+        {"action": "降低学习率 fine-tune；冻结部分网络", "priority": 3},
+        {"action": "EWC / synaptic intelligence 等正则化方法", "priority": 4},
+        {"action": "Curriculum 平滑过渡而非阶跃；多任务采样按任务均衡 batch", "priority": 5}
+      ],
+      "verification": "切换任务后旧任务性能下降 <10-20%；多任务 reward 同步上升",
+      "sources": ["SB3 rl_tips (off-policy replay)", "EWC 文献", "legged_gym curriculum 平滑过渡"]
+    },
+    {
+      "id": "sim_to_real_gap",
+      "name": "Sim-to-Real Gap",
+      "category": "deployment",
+      "summary": "仿真训得好，真机拉胯",
+      "symptoms": [
+        {"metric": "sim_reward", "pattern": "near_optimal", "note": "仿真 reward 接近最优"},
+        {"metric": "real_success_rate", "pattern": "low", "threshold": 0.5, "note": "真机远低于仿真（>50% gap）[经验]"},
+        {"metric": "real_action", "pattern": "jittering_or_unstable", "note": "仿真平滑，真机抖动或失稳"},
+        {"metric": "real_episode_length", "pattern": "short", "note": "真机早期失败"}
+      ],
+      "root_causes": [
+        "仿真动力学不精确（摩擦、惯量、电机延迟、柔性）",
+        "Domain randomization 范围不足或过强",
+        "观测在真机有噪声/延迟，仿真未建模",
+        "Action 在真机受物理约束，仿真未限",
+        "Sim 观测 vs 真机观测分布不一致（相机、IMU 偏置）"
+      ],
+      "fixes": [
+        {"action": "加强 domain randomization：摩擦、质量、电机增益、延迟 [legged_gym 默认随机化]", "priority": 1},
+        {"action": "加入观测噪声（Gaussian）与延迟（1-2 step）", "priority": 2},
+        {"action": "系统辨识：测真机参数填回仿真", "priority": 3},
+        {"action": "Action 限幅到真机可达范围；加 action 平滑", "priority": 4},
+        {"action": "Teacher-student / distillation：仿真 privileged info 训 teacher，真机 sensor 训 student", "priority": 5}
+      ],
+      "verification": "仿真带 randomization 时 reward 仍稳定；真机 success rate 提升；gap 缩小",
+      "sources": ["legged_gym (DR 默认开启)", "ANYmal sim-to-real 论文 (ETH)", "Lee et al. 2020", "Hwangbo et al. 2019"]
+    },
+    {
+      "id": "training_divergence",
+      "name": "Training Divergence",
+      "category": "training_instability",
+      "summary": "训练全程不收敛甚至下降，多 seed 全失败",
+      "symptoms": [
+        {"metric": "reward", "pattern": "non_increasing", "note": "全程不上升甚至下降"},
+        {"metric": "loss", "pattern": "oscillation_or_nan", "note": "震荡或 NaN"},
+        {"metric": "grad_norm", "pattern": "periodic_explosion", "note": "周期性爆炸"},
+        {"metric": "value_estimate", "pattern": "divergence", "note": "绝对值持续增大"}
+      ],
+      "root_causes": [
+        "算法实现 bug（advantage 符号、log-prob 维度、broadcast 错误）",
+        "超参严重错误（lr 过高、clip 过大、gamma 接近 1 且长 episode）",
+        "Reward 设计矛盾（term 互相抵消或震荡）",
+        "网络架构不当（输出层无激活约束、critic 共享导致梯度冲突）",
+        "数据 pipeline bug（obs-action-reward 错位）"
+      ],
+      "fixes": [
+        {"action": "先用 reference implementation（SB3 / CleanRL）在简单 env（CartPole）验证 pipeline", "priority": 1},
+        {"action": "Andy Jones probe environments：单 obs 单 action 常数 reward，验证各组件", "priority": 2},
+        {"action": "检查 advantage 计算、done 处理、GAE", "priority": 3},
+        {"action": "降低 lr、clip、num_epochs 到保守值", "priority": 4},
+        {"action": "单 seed 逐步加组件，定位引入发散的改动", "priority": 5}
+      ],
+      "verification": "Probe env 上各组件能学到位；简单 env reward 正常上升",
+      "sources": ["Andy Jones RL debugging", "SB3 rl_tips (broadcast mistake)", "Spinning Up (broken code fails silently)"]
+    },
+    {
+      "id": "sample_inefficiency",
+      "name": "Sample Inefficiency",
+      "category": "performance",
+      "summary": "学得太慢，需巨量 step 才达可接受水平",
+      "symptoms": [
+        {"metric": "reward", "pattern": "slow_increase", "threshold": 1e7, "note": "需 >>1e7 step 才达可接受水平 [经验]"},
+        {"metric": "benchmark_comparison", "pattern": "below_literature", "note": "同等 step 数显著低于文献"},
+        {"metric": "loss", "pattern": "normal_but_small_improvement", "note": "loss 正常但每次 update 改善极小"}
+      ],
+      "root_causes": [
+        "On-policy（PPO）天然 sample inefficient（model-free 需百万级交互）[文献]",
+        "Batch size 过小",
+        "num_epochs / minibatch 过少，数据利用不足",
+        "网络过小或过大",
+        "Reward shaping 差导致学习信号弱",
+        "缺少 off-policy 或 model-based 方法"
+      ],
+      "fixes": [
+        {"action": "增大 batch size（Andy Jones：Pong ~1k, Space Invaders ~10k, Dota ~100k）", "priority": 1},
+        {"action": "增加 num_epochs（4-10）和 minibatch 数", "priority": 2},
+        {"action": "切换到 off-policy（SAC/TD3）+ replay buffer；或 DroQ", "priority": 3},
+        {"action": "用 HER（goal task）", "priority": 4},
+        {"action": "用 model-based（Dreamer 等）或 demo 数据预训练", "priority": 5},
+        {"action": "提高并行 env 数（Isaac Lab GPU 并行成千上万 env）", "priority": 6}
+      ],
+      "verification": "同等 step 数 reward 显著提升；达到目标 reward 所需 step 数下降",
+      "sources": ["SB3 rl_tips (model-free 需百万样本)", "Andy Jones (large batch size)"]
+    },
+    {
+      "id": "reward_scale_imbalance",
+      "name": "Reward Scale Imbalance",
+      "category": "reward_design",
+      "summary": "多 reward term 量级不匹配，某项主导训练",
+      "symptoms": [
+        {"metric": "reward_term_contribution", "pattern": "dominant", "threshold": 0.5, "note": "某项量级远超其他（>2 个数量级）[经验]"},
+        {"metric": "training", "pattern": "only_optimizes_one_term", "note": "训练只优化该 term，其他 term 表现被牺牲"},
+        {"metric": "total_reward", "pattern": "increasing_but_imbalanced", "note": "total 上升但分解后各项比例严重失衡"}
+      ],
+      "root_causes": [
+        "各 reward term 物理量纲不同未归一化（如 velocity +1.0 vs torque -0.00001）",
+        "Penalty 与 reward 量级不匹配",
+        "Reward 系数手动调但未做相对量级检查",
+        "不同 episode 长度导致累计 reward 量级差异（未 normalize per-step）"
+      ],
+      "fixes": [
+        {"action": "打印 per-term contribution，确保无单 term 占比 >50-70%", "priority": 1},
+        {"action": "手动 scale 各 term 使典型 episode 内各项累计贡献量级相当（目标网络 target 在 [-1,1] 量级）[Andy Jones]", "priority": 2},
+        {"action": "用 reward normalization（RunningMeanStd）整体归一化（注意会改变相对比例，谨慎）", "priority": 3},
+        {"action": "对 penalty 用相对量（如 action_rate / max_action）", "priority": 4},
+        {"action": "Curriculum 调整：训练中动态 reweight", "priority": 5}
+      ],
+      "verification": "Per-term contribution 均衡；各 term 同向优化；total reward 与目标 task metric 同向",
+      "sources": ["Andy Jones (hand-tune reward scale, target [-1,+1])", "legged_gym reward scales (torques=-0.00001 vs lin_vel=1.0)"]
+    },
+    {
+      "id": "exploration_exploitation_imbalance",
+      "name": "Exploration-Exploitation Imbalance",
+      "category": "exploration_failure",
+      "summary": "探索与利用失衡——或过度探索导致 reward 无法收敛，或过度利用卡死在次优解",
+      "symptoms": [
+        {"metric": "entropy", "pattern": "constant_high", "threshold": 1.5, "note": "持续 >1.5 不下降（过度探索）[经验]"},
+        {"metric": "entropy", "pattern": "constant_low", "threshold": 0.1, "note": "前 100 iter 就 <0.1 且不恢复（过度利用）[经验]"},
+        {"metric": "action_std", "pattern": "no_decay", "note": "连续动作 std 不衰减（应从 1.0 衰减到 0.1 左右）"},
+        {"metric": "reward", "pattern": "oscillation_or_plateau", "note": "震荡（探索过多）或早期平台（利用过早）"}
+      ],
+      "root_causes": [
+        "entropy_coef 设置不当（过高→不收敛，过低→过早利用）",
+        "学习率过高，policy 快速塌缩；过低，policy 不动",
+        "Action std 没有 schedule（恒定 std 探索不足）",
+        "Curriculum 步进过快，agent 在新难度上被迫重新探索"
+      ],
+      "fixes": [
+        {"action": "诊断 entropy 走势：早期 0.5-1.5，后期缓慢下降到 0.1-0.3（PPO）", "priority": 1},
+        {"action": "调整 entropy_coef：PPO 默认 0.0-0.01；探索不足时上调到 0.01-0.05", "priority": 2},
+        {"action": "SAC：自动调 alpha 时检查 target_entropy=-|A|；手动 alpha 时 0.1-0.5", "priority": 3},
+        {"action": "加 action std schedule（线性衰减或自适应）", "priority": 4},
+        {"action": "Curriculum 步长放缓，给 agent 足够探索时间", "priority": 5}
+      ],
+      "verification": "Entropy 训练曲线呈 sigmoid 形（早期高、中期下降、后期平稳）；reward 单调上升或带轻微震荡",
+      "sources": ["PPO 原论文 (entropy bonus)", "SAC 原论文 (alpha auto-tune)", "SB3 rl_tips (lr & entropy trade-off)"]
+    },
+    {
+      "id": "observation_space_mismatch",
+      "name": "Observation Space Mismatch",
+      "category": "data_pipeline",
+      "summary": "观测空间设计不当——维度缺失、冗余或量级失衡，policy 学不出有效表征",
+      "symptoms": [
+        {"metric": "training", "pattern": "slow_convergence", "note": "收敛极慢或达不到文献水平"},
+        {"metric": "obs_magnitude", "pattern": "scale_mismatch", "note": "不同 obs group 量级差异大（如 joint_pos ±3 vs IMU ±10 vs pixels 0-255）"},
+        {"metric": "policy_network", "pattern": "dead_neurons", "note": "网络底层大量神经元不激活（obs 维度冗余）"},
+        {"metric": "explainability", "pattern": "low_activation", "note": "某些 obs 输入对输出无影响（saliency 分析）"}
+      ],
+      "root_causes": [
+        "关键状态缺失（如四足 locomotion 缺少 gravity_vec 或 lin_vel 导致部分可观测）",
+        "冗余 obs 污染统计（同时有 joint_pos 与 joint_cos/sin）",
+        "未归一化（物理量量级差异导致 ReLU 饱和或梯度不均）",
+        "Obs history 太短（无法建模速度/加速度），或太长（噪声与维度爆炸）"
+      ],
+      "fixes": [
+        {"action": "审计 obs group：列出每组 obs 的物理量纲与典型量级", "priority": 1},
+        {"action": "补关键状态：四足 locomotion 必备 proprioception（joint pos/vel, ang_vel, gravity_vec, command）", "priority": 2},
+        {"action": "对每个 obs group 单独归一化（VecNormalize 或显式除以最大量级）", "priority": 3},
+        {"action": "用 obs history（如 3-50 步）替代单步观测，policy 可隐式建模动态", "priority": 4},
+        {"action": "用 saliency / feature importance 分析哪些 obs 对 policy 输出有贡献，移除冗余维度", "priority": 5}
+      ],
+      "verification": "Obs 各维度均值 ~0、std ~1；收敛速度提升；reward 达到文献水平；saliency 显示关键 obs 都在用",
+      "sources": ["legged_gym observation config (proprioception 必备项)", "Walk These Ways (obs history)", "SB3 rl_tips (always normalize the input)"]
+    }
+  ]
+}

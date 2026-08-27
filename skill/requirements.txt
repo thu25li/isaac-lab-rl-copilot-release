@@ -1,0 +1,26 @@
+# Isaac Lab RL Engineering Co-pilot — Python dependencies
+#
+# Note: Isaac Lab itself is NOT required for the skill's static analysis,
+# pattern retrieval, and log parsing features. It is only needed for the
+# optional runtime reward validation feature.
+
+# Core dependencies (required)
+jinja2>=3.1.0          # Template rendering for code generation
+pyyaml>=6.0            # Config parsing
+
+# Log analysis dependencies (required for module 2)
+tensorboard>=2.13.0    # TensorBoard event file parsing
+
+# Optional: numerical analysis
+numpy>=1.24.0          # Statistical computations on metrics
+
+# Visualization (anomaly plots)
+matplotlib>=3.7.0      # Headless PNG rendering of metric series + symptoms
+
+# Development / testing
+pytest>=7.4.0          # Test runner
+pytest-cov>=4.1.0      # Coverage reporting
+
+# Optional: runtime reward validation (requires Isaac Lab installation)
+# isaacsim[all]>=4.0.0
+# isaaclab>=1.0.0

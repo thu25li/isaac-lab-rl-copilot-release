@@ -1,0 +1,26 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.Python
+.pytest_cache/
+.coverage
+
+# Secrets — NEVER commit
+.env
+.env.local
+agent_server/.env
+
+# Runtime outputs (regenerated per request)
+agent_server/logs/
+logs/
+
+# OS / IDE
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+# local debug logs
+agent_server/server.log
+*.log

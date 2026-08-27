@@ -1,0 +1,16 @@
+# 开发过程文档 — 仅本地保存，暂不发布
+技术演进文档-整合版.md
+
+# Python
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# 运行时产物
+logs/
+agent/agent_server/logs/
+examples/end_to_end_demo_outputs/
+
+# 密钥
+.env
+*.local

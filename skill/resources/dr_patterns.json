@@ -1,0 +1,284 @@
+{
+  "version": "0.1.0",
+  "source": "curated from legged_gym (ETH RSL), IsaacLab (NVIDIA), IsaacGymEnvs, Walk These Ways, OpenAI sim-to-real papers",
+  "note": "所有 DR 参数范围均引用自上述源码库的实际配置。范围遵循'宽到有效，窄到可学'原则——起始用窄范围，训练收敛后逐步加宽。机器人类型决定参数量级。",
+  "robot_profiles": {
+    "quadruped_small": {
+      "description": "小型四足（Unitree A1, ANYmal C, Spot Mini）",
+      "mass_kg": 12.0,
+      "examples": ["A1", "ANYmal C", "Spot Mini", "Go1"],
+      "defaults": {
+        "mass_range": [-2.0, 2.0],
+        "friction_range": [0.3, 1.2],
+        "motor_stiffness_range": [0.8, 1.2],
+        "motor_damping_range": [0.8, 1.2],
+        "joint_damping_range": [0.0, 0.5],
+        "joint_friction_range": [0.0, 0.05],
+        "external_force_range": [0.0, 5.0],
+        "obs_noise_lin_vel": 0.05,
+        "obs_noise_ang_vel": 0.05,
+        "obs_noise_joint_pos": 0.01,
+        "obs_noise_joint_vel": 0.05
+      }
+    },
+    "quadruped_large": {
+      "description": "大型四足（ANYmal B, Spot, MIT Cheetah）",
+      "mass_kg": 30.0,
+      "examples": ["ANYmal B", "Spot", "MIT Cheetah 3"],
+      "defaults": {
+        "mass_range": [-5.0, 5.0],
+        "friction_range": [0.3, 1.2],
+        "motor_stiffness_range": [0.8, 1.2],
+        "motor_damping_range": [0.8, 1.2],
+        "joint_damping_range": [0.0, 1.0],
+        "joint_friction_range": [0.0, 0.1],
+        "external_force_range": [0.0, 15.0],
+        "obs_noise_lin_vel": 0.05,
+        "obs_noise_ang_vel": 0.05,
+        "obs_noise_joint_pos": 0.01,
+        "obs_noise_joint_vel": 0.05
+      }
+    },
+    "quadruped_medium": {
+      "description": "中型四足（Unitree Go2, ANYmal D, MIT Mini Cheetah）",
+      "mass_kg": 15.0,
+      "examples": ["Unitree Go2", "ANYmal D", "MIT Mini Cheetah"],
+      "defaults": {
+        "mass_range": [-3.0, 3.0],
+        "friction_range": [0.3, 1.2],
+        "motor_stiffness_range": [0.8, 1.2],
+        "motor_damping_range": [0.8, 1.2],
+        "joint_damping_range": [0.0, 0.7],
+        "joint_friction_range": [0.0, 0.08],
+        "external_force_range": [0.0, 8.0],
+        "com_offset_range": [-0.05, 0.05],
+        "added_payload_range": [0.0, 2.0],
+        "obs_noise_lin_vel": 0.05,
+        "obs_noise_ang_vel": 0.05,
+        "obs_noise_joint_pos": 0.01,
+        "obs_noise_joint_vel": 0.05
+      }
+    },
+    "biped_small": {
+      "description": "小型双足（Cassie, Digit Mini）",
+      "mass_kg": 15.0,
+      "examples": ["Cassie", "Digit"],
+      "defaults": {
+        "mass_range": [-1.0, 1.0],
+        "friction_range": [0.4, 1.0],
+        "motor_stiffness_range": [0.85, 1.15],
+        "motor_damping_range": [0.85, 1.15],
+        "joint_damping_range": [0.0, 0.3],
+        "joint_friction_range": [0.0, 0.03],
+        "external_force_range": [0.0, 3.0],
+        "obs_noise_lin_vel": 0.05,
+        "obs_noise_ang_vel": 0.05,
+        "obs_noise_joint_pos": 0.01,
+        "obs_noise_joint_vel": 0.05
+      }
+    },
+    "manipulator_arm": {
+      "description": "机械臂（UR5e, Franka Panda, KUKA）",
+      "mass_kg": 5.0,
+      "examples": ["UR5e", "Franka Panda", "KUKA iiwa"],
+      "defaults": {
+        "mass_range": [-0.5, 0.5],
+        "friction_range": [0.5, 1.0],
+        "motor_stiffness_range": [0.9, 1.1],
+        "motor_damping_range": [0.9, 1.1],
+        "joint_damping_range": [0.0, 0.2],
+        "joint_friction_range": [0.0, 0.02],
+        "external_force_range": [0.0, 2.0],
+        "obs_noise_lin_vel": 0.02,
+        "obs_noise_ang_vel": 0.02,
+        "obs_noise_joint_pos": 0.005,
+        "obs_noise_joint_vel": 0.02
+      }
+    }
+  },
+  "dr_terms": [
+    {
+      "id": "robot_mass",
+      "name": "Robot Mass Randomization",
+      "category": "physics",
+      "render_type": "event_term",
+      "purpose": "模拟 payload 变化（背摄像头、电池、传感器），增强对质量不确定性的鲁棒性",
+      "isaac_lab_func": "mdp.add_robot_mass",
+      "mode": "reset",
+      "params": {"asset_cfg": "SceneEntityCfg('robot')", "mass_range": "relative_offset_kg"},
+      "param_mapping": {"mass_range": "mass_range"},
+      "typical_range_note": "相对偏差（kg），通常为机器人质量的 ±10-20%",
+      "pitfalls": [
+        "范围过大导致训练不收敛——agent 学不会应对极端质量",
+        "随机化后未重新计算动力学（Isaac Lab 的 add_robot_mass 已处理，自定义函数需注意）",
+        "对双足机器人影响比四足更大（双足平衡对质量分布更敏感）"
+      ],
+      "sources": ["legged_gym::_randomize_rigid_body_props", "isaaclab/envs/mdp/events.py::add_robot_mass"]
+    },
+    {
+      "id": "ground_friction",
+      "name": "Ground Friction Randomization",
+      "category": "physics",
+      "render_type": "event_term",
+      "purpose": "模拟地面材质差异（草地、水泥、地毯），是 sim-to-real 最关键的 DR 之一",
+      "isaac_lab_func": "mdp.randomize_rigid_body_material",
+      "mode": "reset",
+      "params": {"asset_cfg": "SceneEntityCfg('robot')", "friction_range": "static_friction_coef", "num_buckets": 16},
+      "param_mapping": {"friction_range": "friction_range"},
+      "static_params": {"num_buckets": 16},
+      "typical_range_note": "静摩擦系数，室内 0.5-1.0，户外 0.2-1.5",
+      "pitfalls": [
+        "friction=0 导致物理不稳定（无限滑动）",
+        "friction>2 不真实，policy 学会'粘'在地上",
+        "高频随机化拖慢训练——用 num_buckets 离散化减少 PhysX material 切换"
+      ],
+      "sources": ["legged_gym::_randomize_rigid_body_props", "isaaclab/envs/mdp/events.py::randomize_rigid_body_material"]
+    },
+    {
+      "id": "motor_strength",
+      "name": "Motor Strength Randomization",
+      "category": "physics",
+      "render_type": "event_term",
+      "purpose": "模拟电机磨损、电池电压下降、驱动器差异",
+      "isaac_lab_func": "mdp.randomize_actuator_parameters",
+      "mode": "reset",
+      "params": {"asset_cfg": "SceneEntityCfg('robot', joint_names='.*')", "stiffness_range": "relative_ratio", "damping_range": "relative_ratio"},
+      "param_mapping": {"stiffness_range": "motor_stiffness_range", "damping_range": "motor_damping_range"},
+      "typical_range_note": "相对比例（1.0=标称），通常 ±10-20%",
+      "pitfalls": [
+        "范围超过 ±30% 训练困难",
+        "stiffness 和 damping 应同步随机化（否则 PD 控制器不稳定）",
+        "Isaac Lab 的隐式 actuator 模型中 stiffness/damping 直接影响关节响应"
+      ],
+      "sources": ["isaaclab/envs/mdp/events.py::randomize_actuator_parameters", "legged_gym::_randomize_actuator_properties"]
+    },
+    {
+      "id": "joint_damping_friction",
+      "name": "Joint Damping & Friction",
+      "category": "physics",
+      "render_type": "event_term",
+      "purpose": "模拟关节内部物理摩擦（非地面摩擦）",
+      "isaac_lab_func": "mdp.randomize_joint_parameters",
+      "mode": "reset",
+      "params": {"asset_cfg": "SceneEntityCfg('robot', joint_names='.*')", "damping_range": "N·m·s/rad", "friction_range": "N·m"},
+      "param_mapping": {"damping_range": "joint_damping_range", "friction_range": "joint_friction_range"},
+      "typical_range_note": "damping 0-0.5（小机器人）/ 0-1.0（大机器人），friction 0-0.05 / 0-0.1",
+      "pitfalls": [
+        "damping 过大→关节响应过慢",
+        "friction 过大→关节卡死",
+        "不同关节（hip vs knee）可能需要不同范围，但通常统一处理"
+      ],
+      "sources": ["isaaclab/envs/mdp/events.py::randomize_joint_parameters"]
+    },
+    {
+      "id": "external_force",
+      "name": "External Force Disturbance",
+      "category": "perturbation",
+      "render_type": "event_term",
+      "purpose": "模拟风、碰撞、人为推搡，测试鲁棒性",
+      "isaac_lab_func": "mdp.apply_random_external_force",
+      "mode": "interval",
+      "interval_time_s": 5.0,
+      "params": {"asset_cfg": "SceneEntityCfg('robot')", "force_range": "N", "direction_range": "[0, 2π]"},
+      "param_mapping": {"force_range": "external_force_range"},
+      "static_params": {"direction_range": [0, 6.283185307179586]},
+      "typical_range_note": "测试鲁棒性 0-5N，极端扰动 0-20N（接近机器人自重 10%）",
+      "pitfalls": [
+        "force 过大导致训练不收敛",
+        "方向随机 vs 固定方向：随机更接近真机但更难训练",
+        "interval_time_s 过短→持续扰动，过长→偶尔扰动"
+      ],
+      "sources": ["isaaclab/envs/mdp/events.py::apply_random_external_force", "legged_gym::push_robot"]
+    },
+    {
+      "id": "obs_noise",
+      "name": "Observation Noise Injection",
+      "category": "sensor",
+      "render_type": "obs_cfg",
+      "purpose": "模拟 IMU 漂移、编码器量化、电流传感器噪声",
+      "isaac_lab_func": "ObservationTermCfg(noise=...)",
+      "mode": "per_step",
+      "params": {"noise_type": "gaussian", "std": "per_metric"},
+      "param_mapping": {"obs_noise_lin_vel": "obs_noise_lin_vel", "obs_noise_ang_vel": "obs_noise_ang_vel", "obs_noise_joint_pos": "obs_noise_joint_pos", "obs_noise_joint_vel": "obs_noise_joint_vel"},
+      "typical_range_note": "lin_vel/ang_vel 0.05, joint_pos 0.01 rad, joint_vel 0.05 rad/s",
+      "pitfalls": [
+        "噪声过大→观测不可信，policy 无法学习",
+        "IMU 噪声通常比仿真大——真机有温度漂移、量化误差",
+        "延迟模拟（obs history）比高斯噪声更接近真机 IMU"
+      ],
+      "sources": ["isaaclab/envs/mdp/observations.py::OpenNoiseCfg", "legged_gym observation noise"]
+    },
+    {
+      "id": "action_delay",
+      "name": "Action Delay Simulation",
+      "category": "sensor",
+      "render_type": "obs_cfg",
+      "purpose": "模拟真机控制延迟（通信+计算+驱动，通常 5-30ms）",
+      "isaac_lab_func": "ObservationTermCfg(history_length=...)",
+      "mode": "per_step",
+      "params": {"history_length": "steps_to_delay"},
+      "static_params": {"history_length": 2},
+      "typical_range_note": "1-3 步延迟（50Hz 控制下 20-60ms）",
+      "pitfalls": [
+        "延迟过大→policy 无法关联动作与效果",
+        "固定延迟 vs 随机延迟：随机更接近真机但更难训练",
+        "延迟应加在 obs 上（用 history），不是 action 上"
+      ],
+      "sources": ["Walk These Ways observation history", "legged_gym delay simulation"]
+    },
+    {
+      "id": "center_of_mass_offset",
+      "name": "Center of Mass Offset Randomization",
+      "category": "physics",
+      "render_type": "event_term",
+      "purpose": "随机化质心位置，模拟 payload 安装位置变化、电池/传感器分布差异——sim-to-real 关键 DR",
+      "isaac_lab_func": "mdp.randomize_rigid_body_mass_params",
+      "mode": "reset",
+      "params": {"asset_cfg": "SceneEntityCfg('robot')", "mass_params_cfg": "MassParamsCfg(com_offset_range=...)"},
+      "param_mapping": {"com_offset_range": "com_offset_range"},
+      "typical_range_note": "相对偏移（m），通常 ±2-5cm；机器人越大范围越大",
+      "pitfalls": [
+        "com_offset 过大（>10cm）→ 机器人动态失稳，训练不收敛",
+        "com_offset 仅影响动力学，不改变几何——payload 物理位置需单独处理",
+        "必须配合 mass_range 同步随机化（单独随机 com 物理上不合理）"
+      ],
+      "sources": ["isaaclab/envs/mdp/events.py::randomize_rigid_body_mass_params", "legged_gym::_randomize_rigid_body_props", "Tan et al. 2018 sim-to-real"]
+    },
+    {
+      "id": "terrain_randomization",
+      "name": "Terrain Randomization",
+      "category": "environment",
+      "render_type": "event_term",
+      "purpose": "随机地形（粗糙度、台阶、斜坡），与 terrain_levels 课程配合——rough terrain locomotion 的核心 DR",
+      "isaac_lab_func": "mdp.randomize_terrain",
+      "mode": "reset",
+      "params": {"terrain_cfg": "TerrainCfg(num_rows, num_cols, difficulty, ...)", "curriculum": "optional_terrain_levels"},
+      "static_params": {"num_rows": 20, "num_cols": 20},
+      "typical_range_note": "难度 0.0-1.0（curriculum 控制），地形类型：flat / rough / stairs / slopes",
+      "pitfalls": [
+        "地形难度过大致训练不收敛——必须配合 curriculum",
+        "env 切换地形后必须 spawn 到对应 level 起点",
+        "TerrainCfg 配置复杂——建议直接用 IsaacLab 自带 terrain generators",
+        " Rough terrain 必须配合 height_scan observation 才能有效学习"
+      ],
+      "sources": ["legged_gym::terrain.py::Terrain", "isaaclab_tasks/manager_based/locomotion/velocity/config", "Lee et al. 2020 (ANYmal rough terrain)"]
+    }
+  ],
+  "task_recommendations": {
+    "locomotion_velocity": {
+      "essential": ["robot_mass", "ground_friction", "motor_strength"],
+      "recommended": ["center_of_mass_offset", "joint_damping_friction", "obs_noise", "action_delay"],
+      "optional": ["external_force", "terrain_randomization"]
+    },
+    "locomotion_rough_terrain": {
+      "essential": ["robot_mass", "ground_friction", "motor_strength", "joint_damping_friction", "terrain_randomization"],
+      "recommended": ["center_of_mass_offset", "obs_noise", "action_delay", "external_force"],
+      "optional": []
+    },
+    "manipulation_reach": {
+      "essential": ["robot_mass", "motor_strength", "obs_noise"],
+      "recommended": ["joint_damping_friction", "action_delay"],
+      "optional": ["external_force", "ground_friction"]
+    }
+  }
+}

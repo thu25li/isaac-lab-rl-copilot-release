@@ -1,0 +1,104 @@
+{
+  "version": "1.x",
+  "source": "https://github.com/isaac-sim/IsaacLab",
+  "doc_url": "https://isaac-sim.github.io/IsaacLab/main/source/api/lab/isaaclab.envs.mdp.html",
+  "reward_function": {
+    "signature": "fn(env: ManagerBasedRLEnv, **params) -> torch.Tensor",
+    "return_shape": "(num_envs,)",
+    "return_dtype": "float",
+    "notes": "Module-level function, not a method. First param is `env`, not `self`. Access asset via `env.scene[asset_cfg.name]`, commands via `env.command_manager.get_command(name)`."
+  },
+  "reward_config": {
+    "type": "RewardTermCfg (alias RewTerm)",
+    "fields": {
+      "func": "callable — the reward function",
+      "weight": "float — weight applied to the term (negative for penalty)",
+      "params": "dict — parameters passed to func"
+    },
+    "container": "@configclass RewardsCfg — holds RewTerm fields, mounted on ManagerBasedRLEnvCfg.rewards"
+  },
+  "builtin_rewards": {
+    "general": [
+      {"name": "is_alive", "purpose": "存活奖励（未终止时为 1）"},
+      {"name": "is_terminated", "purpose": "惩罚非超时终止"},
+      {"name": "is_terminated_term", "purpose": "按终止 term 名细分的惩罚（class-based）"}
+    ],
+    "base": [
+      {"name": "lin_vel_z_l2", "purpose": "惩罚 z 轴线速度（防颠簸）"},
+      {"name": "ang_vel_xy_l2", "purpose": "惩罚 roll/pitch 角速度（保持航向）"},
+      {"name": "flat_orientation_l2", "purpose": "惩罚 projected gravity xy 分量（保持水平）"},
+      {"name": "base_height_l2", "purpose": "惩罚基座高度偏离目标值"},
+      {"name": "body_lin_acc_l2", "purpose": "惩罚刚体线加速度（平滑运动）"}
+    ],
+    "joint": [
+      {"name": "joint_torques_l2", "purpose": "惩罚关节力矩（节能）"},
+      {"name": "joint_vel_l1", "purpose": "惩罚关节速度 (L1)"},
+      {"name": "joint_vel_l2", "purpose": "惩罚关节速度 (L2)"},
+      {"name": "joint_acc_l2", "purpose": "惩罚关节加速度（平滑动作）"},
+      {"name": "joint_deviation_l1", "purpose": "惩罚关节偏离默认位置"},
+      {"name": "joint_pos_limits", "purpose": "惩罚越过软位置限位"},
+      {"name": "joint_vel_limits", "purpose": "惩罚越过软速度限位"}
+    ],
+    "action": [
+      {"name": "applied_torque_limits", "purpose": "惩罚施加力矩超物理极限"},
+      {"name": "action_rate_l2", "purpose": "惩罚相邻动作变化率（平滑控制）"},
+      {"name": "action_l2", "purpose": "惩罚动作幅度（节能）"}
+    ],
+    "contact": [
+      {"name": "undesired_contacts", "purpose": "惩罚非期望接触数量"},
+      {"name": "desired_contacts", "purpose": "惩罚期望接触缺失"},
+      {"name": "contact_forces", "purpose": "惩罚净接触力超阈值"}
+    ],
+    "velocity_tracking": [
+      {"name": "track_lin_vel_xy_exp", "purpose": "指数核跟踪 xy 线速度命令（base frame）"},
+      {"name": "track_ang_vel_z_exp", "purpose": "指数核跟踪 yaw 角速度命令（base frame）"}
+    ],
+    "task_level_velocity": [
+      {"name": "feet_air_time", "purpose": "鼓励足部空中时间（步态周期性）"},
+      {"name": "feet_air_time_positive_biped", "purpose": "双足空中时间（biped 专用）"},
+      {"name": "feet_slide", "purpose": "惩罚足部滑动"},
+      {"name": "track_lin_vel_xy_yaw_frame_exp", "purpose": "gravity-aligned yaw frame 速度跟踪"},
+      {"name": "track_ang_vel_z_world_exp", "purpose": "world frame 角速度跟踪"},
+      {"name": "stand_still_joint_deviation_l1", "purpose": "零命令时惩罚关节偏离"}
+    ]
+  },
+  "example_reward_function": {
+    "name": "track_lin_vel_xy_exp",
+    "signature": "track_lin_vel_xy_exp(env, std, command_name, asset_cfg=SceneEntityCfg(\"robot\")) -> torch.Tensor",
+    "code": "def track_lin_vel_xy_exp(env, std, command_name, asset_cfg=SceneEntityCfg(\"robot\")):\n    asset = env.scene[asset_cfg.name]\n    lin_vel_error = torch.sum(\n        torch.square(\n            env.command_manager.get_command(command_name)[:, :2]\n            - asset.data.root_lin_vel_b[:, :2]\n        ),\n        dim=1,\n    )\n    return torch.exp(-lin_vel_error / std**2)",
+    "notes": "返回 (num_envs,) 张量，值域 (0, 1]，std 控制核宽。root_lin_vel_b 是 base frame 下的线速度。"
+  },
+  "example_rewards_cfg": {
+    "description": "典型的四足 locomotion RewardsCfg（来自 velocity_env_cfg.py）",
+    "terms": {
+      "track_lin_vel_xy_exp": {"func": "mdp.track_lin_vel_xy_exp", "weight": 1.0, "params": {"command_name": "base_velocity", "std": "math.sqrt(0.25)"}},
+      "track_ang_vel_z_exp": {"func": "mdp.track_ang_vel_z_exp", "weight": 0.5, "params": {"command_name": "base_velocity", "std": "math.sqrt(0.25)"}},
+      "lin_vel_z_l2": {"func": "mdp.lin_vel_z_l2", "weight": -2.0},
+      "ang_vel_xy_l2": {"func": "mdp.ang_vel_xy_l2", "weight": -0.05},
+      "flat_orientation_l2": {"func": "mdp.flat_orientation_l2", "weight": 0.0, "note": "weight=0 禁用，可选 penalty"},
+      "joint_torques_l2": {"func": "mdp.joint_torques_l2", "weight": -1.0e-5},
+      "joint_acc_l2": {"func": "mdp.joint_acc_l2", "weight": -2.5e-7},
+      "action_rate_l2": {"func": "mdp.action_rate_l2", "weight": -0.01},
+      "feet_air_time": {"func": "mdp.feet_air_time", "weight": 0.125, "params": {"sensor_cfg": "SceneEntityCfg(\"contact_forces\", body_names=\".*FOOT\")", "command_name": "base_velocity", "threshold": 0.5}},
+      "undesired_contacts": {"func": "mdp.undesired_contacts", "weight": -1.0, "params": {"sensor_cfg": "SceneEntityCfg(\"contact_forces\", body_names=\".*THIGH\")", "threshold": 1.0}}
+    }
+  },
+  "weight_heuristics": {
+    "description": "权重分配经验法则（来自 legged_gym / IsaacGymEnvs 实践）",
+    "rules": [
+      "main objective (velocity tracking): weight 1.0-2.0",
+      "stability penalties (orientation, ang_vel): weight -0.05 to -2.0",
+      "energy penalties (torques): weight -1e-5 to -1e-4 (量级小，因 torque 本身量级大)",
+      "smoothness penalties (action_rate, joint_acc): weight -0.01 to -1e-3",
+      "contact penalties: weight -1.0 to -2.0",
+      "disabled optional terms: weight=0.0 (保留在 config 中便于实验)"
+    ]
+  },
+  "common_imports": [
+    "from isaaclab.managers import RewardTermCfg as RewTerm, SceneEntityCfg",
+    "from isaaclab.utils import configclass",
+    "import isaaclab.envs.mdp as mdp",
+    "import math",
+    "import torch"
+  ]
+}
